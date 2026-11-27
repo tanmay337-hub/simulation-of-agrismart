@@ -1,8 +1,17 @@
 # 🌱 Virtual Smart Agriculture Irrigation System
 
-A fully simulated, end-to-end smart irrigation platform that demonstrates how IoT edge nodes (ESP32), an MQTT message broker, a central controller (Raspberry Pi), and a real-time web dashboard would work together to automatically water crops based on soil-moisture sensors.
+A fully simulated, end-to-end smart irrigation platform that demonstrates how IoT edge nodes (ESP32), an MQTT message broker, a central controller (Raspberry Pi), and a real-time web dashboard work together to automatically water crops based on soil-moisture sensors.
 
 > **No real hardware required.** Everything — soil sensors, valves, network delays, and hardware faults — is simulated in Python.
+
+---
+
+## How to Explain This Project in 30 Seconds
+
+1. **4 Independent Field Nodes (`esp32_sector_1..4.py`)**: Each farm sector runs as its own separate program, measuring soil moisture, temperature, and humidity, and controlling its own water valve.
+2. **Message Broker (`Mosquitto MQTT`)**: All communication travels through a real MQTT message broker (`farm/sectorN/sensors`, `command`, `status`) so components stay decoupled.
+3. **Central Master Brain (`raspberry_pi_master.py`)**: Collects sensor readings, runs a transparent **rule-based engine** (Open `< 30%`, Close `> 55%`, Hold between `30–55%` to prevent rapid switching), records everything in SQLite, and waits for valve confirmations (`ACKs`).
+4. **Safety & Fail-Safe**: Bad or frozen (stale) sensor data never triggers watering, and if a node loses contact with the master for too long, it automatically closes its own valve.
 
 ---
 
