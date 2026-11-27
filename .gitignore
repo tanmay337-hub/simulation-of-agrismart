@@ -12,6 +12,9 @@ data/*
 logs/*
 !logs/.gitkeep
 
+# Netlify CLI state
+.netlify/
+
 # IDE / OS artifacts
 .vscode/
 .idea/
