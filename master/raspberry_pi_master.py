@@ -109,23 +109,36 @@ def _now_ts() -> float:
     return time.monotonic()
 
 
-def _validate_telemetry(data: Any) -> tuple[bool, str]:
-    """Validate an inbound telemetry payload before trusting it for decisions."""
+def _validate_telemetry(data: Any) -> tuple[bool, str, dict[str, str]]:
+    """Validate an inbound telemetry payload channel-by-channel."""
+    channel_errors: dict[str, str] = {}
     if not isinstance(data, dict):
-        return False, "Telemetry payload is not a JSON object"
+        return False, "Telemetry payload is not a JSON object", {"payload": "not a dict"}
     for field, (lo, hi) in VALID_RANGES.items():
         val = data.get(field)
         if val is None:
-            return False, f"Missing required field '{field}'"
-        if isinstance(val, bool) or not isinstance(val, (int, float)) or math.isnan(val) or math.isinf(val):
-            return False, f"Non-numeric field '{field}': {val!r}"
-        if not (lo <= float(val) <= hi):
-            return False, f"'{field}' value {float(val):.2f} out of range [{lo}, {hi}]"
+            channel_errors[field] = f"missing '{field}'"
+        elif isinstance(val, bool) or not isinstance(val, (int, float)) or math.isnan(val) or math.isinf(val):
+            channel_errors[field] = f"non-numeric '{field}': {val!r}"
+        elif not (lo <= float(val) <= hi):
+            channel_errors[field] = f"'{field}'={float(val):.2f} out of [{lo}, {hi}]"
+
+    flow_val = data.get("flow_rate_lpm")
+    if "flow_rate_lpm" in data:
+        if flow_val is None:
+            channel_errors["flow"] = "missing 'flow_rate_lpm'"
+        elif isinstance(flow_val, bool) or not isinstance(flow_val, (int, float)) or math.isnan(flow_val) or math.isinf(flow_val) or float(flow_val) < 0:
+            channel_errors["flow"] = f"invalid flow_rate_lpm={flow_val!r}"
+
     if not data.get("timestamp"):
-        return False, "Missing timestamp"
+        channel_errors["timestamp"] = "missing timestamp"
     if data.get("sequence_number") is None:
-        return False, "Missing sequence_number"
-    return True, "ok"
+        channel_errors["sequence_number"] = "missing sequence_number"
+
+    if channel_errors:
+        summary = "; ".join(channel_errors.values())
+        return False, summary, channel_errors
+    return True, "ok", {}
 
 
 class RaspberryPiMaster:
@@ -148,7 +161,8 @@ class RaspberryPiMaster:
                 "last_reading_ts": None,
                 "valve_state": "CLOSED",
                 "desired_valve_state": "CLOSED",
-                "flow_rate_lpm": self._flow_rate_lpm,
+                "valve_fault_mode": "normal",
+                "flow_rate_lpm": 0.0,
                 "water_consumed_litres": 0.0,
                 "mode": "AUTO",
                 "pending_cmds": {},
@@ -156,6 +170,14 @@ class RaspberryPiMaster:
                 "stale": False,
                 "reading_valid": True,
                 "invalid_reason": "",
+                "sensor_health": {
+                    "moisture": "ok",
+                    "temperature": "ok",
+                    "humidity": "ok",
+                    "light_lux": "ok",
+                    "flow": "ok",
+                },
+                "channel_errors": {},
             }
             for sid in SECTORS
         }
@@ -318,26 +340,50 @@ class RaspberryPiMaster:
 
     def _handle_sensor_message(self, sid: int, data: dict[str, Any]) -> None:
         now = _now_ts()
-        valid, reason = _validate_telemetry(data)
+        valid, reason, ch_errors = _validate_telemetry(data)
+        reported_health = data.get("sensor_health") if isinstance(data, dict) else None
+
+        with self._lock:
+            state = self._sector_state[sid]
+            state["last_seen"] = now
+            state["node_online"] = True
+            if isinstance(reported_health, dict):
+                state["sensor_health"] = dict(reported_health)
+            if isinstance(data, dict):
+                state["valve_fault_mode"] = data.get("valve_fault_mode", "normal")
+                if "water_consumed_litres" in data and isinstance(data["water_consumed_litres"], (int, float)):
+                    state["water_consumed_litres"] = float(data["water_consumed_litres"])
+                if not state["pending_cmds"] and data.get("valve_state") in ("OPEN", "CLOSED"):
+                    state["valve_state"] = data["valve_state"]
 
         if not valid:
-            logger.warning("Sector %s INVALID telemetry rejected: %s (%s)", sid, reason, data)
+            logger.warning("Sector %s INVALID/PARTIAL telemetry: %s", sid, reason)
             with self._lock:
                 state = self._sector_state[sid]
-                state["last_seen"] = now
-                state["node_online"] = True
-                state["reading_valid"] = False
+                state["reading_valid"] = "moisture" not in ch_errors
                 state["invalid_reason"] = reason
-            self._raise_alert(
-                sid,
-                "invalid_sensor_data",
-                f"Sector {sid} sent invalid telemetry ({reason}); excluded from decisions.",
-                severity="WARNING",
-            )
+                state["channel_errors"] = ch_errors
+                # Keep non-faulted numeric channels visible in last_reading for diagnostics
+                if isinstance(data, dict):
+                    merged = dict(state.get("last_reading") or {})
+                    for k, v in data.items():
+                        if k not in ch_errors:
+                            merged[k] = v
+                        else:
+                            merged[k] = v
+                    state["last_reading"] = merged
+
+            for ch, err in ch_errors.items():
+                self._raise_alert(
+                    sid,
+                    f"{ch}_sensor_fault",
+                    f"Sector {sid} {ch} sensor fault ({err}) — RPi 5 safety check triggered.",
+                    severity="CRITICAL" if ch == "moisture" else "WARNING",
+                )
             if self._db:
                 self._db.insert_event(
                     "FAULT",
-                    f"Invalid telemetry on Sector {sid}: {reason}",
+                    f"Sensor fault on Sector {sid}: {reason}",
                     timestamp=_now_iso(),
                     sector_id=sid,
                     payload=data,
@@ -347,7 +393,6 @@ class RaspberryPiMaster:
         seq = data.get("sequence_number")
         reading_ts = str(data.get("timestamp"))
 
-        # Check whether the node is re-sending the exact same frozen reading (stale)
         is_duplicate_reading = False
         with self._lock:
             state = self._sector_state[sid]
@@ -359,19 +404,23 @@ class RaspberryPiMaster:
                 state["last_reading_ts"] = reading_ts
                 state["stale"] = False
 
-            state["last_seen"] = now
-            state["node_online"] = True
             state["reading_valid"] = True
             state["invalid_reason"] = ""
+            state["channel_errors"] = {}
             state["last_reading"] = data
-
-            # Update flow/water metering and confirmed valve state from telemetry if no command pending
-            if "flow_rate_lpm" in data:
+            if "flow_rate_lpm" in data and isinstance(data["flow_rate_lpm"], (int, float)):
                 state["flow_rate_lpm"] = float(data["flow_rate_lpm"])
-            if "water_consumed_litres" in data:
-                state["water_consumed_litres"] = float(data["water_consumed_litres"])
-            if not state["pending_cmds"] and data.get("valve_state") in ("OPEN", "CLOSED"):
-                state["valve_state"] = data["valve_state"]
+
+        # Check individual sensor stale flags reported by node diagnostics
+        if isinstance(reported_health, dict):
+            for ch, s_mode in reported_health.items():
+                if s_mode != "ok":
+                    self._raise_alert(
+                        sid,
+                        f"{ch}_sensor_fault",
+                        f"Sector {sid} {ch} sensor in '{s_mode}' state.",
+                        severity="CRITICAL" if ch == "moisture" else "WARNING",
+                    )
 
         if is_duplicate_reading:
             logger.debug("Sector %s repeated frozen reading seq=%s ts=%s", sid, seq, reading_ts)
@@ -380,6 +429,7 @@ class RaspberryPiMaster:
                 self._db.resolve_alerts(sector_id=sid, alert_type="node_offline")
                 self._db.resolve_alerts(sector_id=sid, alert_type="stale_data")
                 self._db.resolve_alerts(sector_id=sid, alert_type="invalid_sensor_data")
+                self._db.resolve_alerts(sector_id=sid, alert_type="moisture_sensor_fault")
                 self._db.insert_sensor_reading(sector_id=sid, reading_dict=data, timestamp=_now_iso())
 
     def _handle_status_message(self, sid: int, data: dict[str, Any]) -> None:
@@ -637,8 +687,35 @@ class RaspberryPiMaster:
                     )
                 continue
 
-            if not reading_valid or reading is None:
-                logger.debug("Sector %s skipping decision because reading is invalid/missing.", sid)
+            # Safety lock if moisture sensor itself is faulty or stale
+            s_health = state.get("sensor_health", {}) if isinstance(state, dict) else {}
+            with self._lock:
+                s_health = dict(self._sector_state[sid].get("sensor_health", {}))
+                ch_errs = dict(self._sector_state[sid].get("channel_errors", {}))
+                cur_flow = float(self._sector_state[sid].get("flow_rate_lpm", 0.0))
+
+            # Flow / Leak / Supply diagnostics
+            if "flow" not in ch_errs and s_health.get("flow", "ok") == "ok":
+                if current_valve == "OPEN" and cur_flow <= 0.01:
+                    self._raise_alert(
+                        sid,
+                        "zero_flow_fault",
+                        f"Sector {sid} valve is OPEN but flow sensor reads 0.0 L/min (pump/supply failure or blockage)!",
+                        severity="CRITICAL",
+                    )
+                elif current_valve == "CLOSED" and cur_flow > 0.1:
+                    self._raise_alert(
+                        sid,
+                        "valve_leak_detected",
+                        f"Sector {sid} valve is CLOSED but flow sensor reads {cur_flow:.2f} L/min (leak detected)!",
+                        severity="CRITICAL",
+                    )
+
+            moisture_bad = (not reading_valid) or ("moisture" in ch_errs) or (s_health.get("moisture", "ok") != "ok")
+            if moisture_bad or reading is None:
+                logger.warning("Sector %s moisture sensor unreliable — locking AUTO irrigation SAFE.", sid)
+                if mode == "AUTO" and current_valve == "OPEN" and pending_count == 0:
+                    self._publish_command(sid, "CLOSE", source="master_safety")
                 continue
 
             if mode != "AUTO":
@@ -653,6 +730,14 @@ class RaspberryPiMaster:
             except Exception as exc:
                 logger.error("DecisionEngine error for sector %s: %s", sid, exc)
                 continue
+
+            if isinstance(reading.get("temperature"), (int, float)) and float(reading["temperature"]) <= 3.0:
+                self._raise_alert(
+                    sid,
+                    "frost_risk",
+                    f"Sector {sid} temperature {reading['temperature']:.1f}C — FROST CRISIS risk!",
+                    severity="CRITICAL",
+                )
 
             action = decision.get("action", "MAINTAIN")
             for alert_code in decision.get("alerts", []):
@@ -810,9 +895,12 @@ class RaspberryPiMaster:
 
                 sectors_snapshot[str(sid)] = {
                     "sensor": state["last_reading"] or {},
+                    "sensor_health": dict(state.get("sensor_health", {})),
+                    "channel_errors": dict(state.get("channel_errors", {})),
                     "valve": {
                         "state": state["valve_state"],
                         "desired_state": state["desired_valve_state"],
+                        "fault_mode": state.get("valve_fault_mode", "normal"),
                         "flow_rate_lpm": round(float(state["flow_rate_lpm"]), 2),
                         "water_consumed_litres": round(float(state["water_consumed_litres"]), 3),
                     },
@@ -836,16 +924,23 @@ class RaspberryPiMaster:
             alert_count = self._alert_count
             broker_connected = self._broker_connected
 
-        # Include active simulated faults from sim_control.json if present
+        # Include active simulated faults & crisis mode from sim_control.json
         active_faults: list[dict[str, Any]] = []
+        crisis_mode = "normal"
         try:
             with open(SIM_CONTROL_PATH, "r", encoding="utf-8") as fh:
                 sim_ctrl = json.load(fh)
+            crisis_mode = sim_ctrl.get("crisis", "normal")
             for sid_str, sc in sim_ctrl.get("sectors", {}).items():
                 if sc.get("disconnect"):
                     active_faults.append({"sector_id": sid_str, "fault_type": "disconnect", "since": sc.get("updated_at", "")})
                 elif sc.get("fault") and sc.get("fault") != "restore":
                     active_faults.append({"sector_id": sid_str, "fault_type": sc.get("fault"), "since": sc.get("updated_at", "")})
+                if sc.get("valve_fault_mode", "normal") != "normal":
+                    active_faults.append({"sector_id": sid_str, "fault_type": f"valve:{sc['valve_fault_mode']}", "since": sc.get("updated_at", "")})
+                for s_name, s_m in (sc.get("sensor_faults") or {}).items():
+                    if s_m != "ok":
+                        active_faults.append({"sector_id": sid_str, "fault_type": f"{s_name}:{s_m}", "since": sc.get("updated_at", "")})
         except Exception:
             pass
 
@@ -856,9 +951,11 @@ class RaspberryPiMaster:
             "active_valve_count": active_valves,
             "total_water_consumed_litres": round(total_water, 3),
             "alert_count": alert_count,
+            "crisis": crisis_mode,
             "timestamp": _now_iso(),
             "thresholds": self._decision_engine.thresholds if self._decision_engine else {},
             "flow_rate_lpm": self._flow_rate_lpm,
+            "mqtt_stats": self._mqtt.get_stats() if self._mqtt else {},
             "active_faults": active_faults,
             "sectors": sectors_snapshot,
         }

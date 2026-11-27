@@ -283,12 +283,19 @@ def run_esp32_node(sector_id: int) -> None:
         work even when a node is MQTT-disconnected.
         """
         ctrl = _load_json_safe(sim_control_path)
+        # 0. Global crisis mode (heatwave, rainstorm, frost, water_supply_failure, broker_outage)
+        crisis = ctrl.get("crisis", "normal")
+        sensor_sim.set_crisis_mode(crisis)
+        irrigation.set_water_supply_failed(crisis == "water_supply_failure")
+        with lock:
+            state["crisis"] = crisis
+
         sec_ctrl = ctrl.get("sectors", {}).get(str(sector_id), {})
         if not sec_ctrl:
             return
 
-        # 1. Disconnect / Reconnect control
-        want_disconnect = bool(sec_ctrl.get("disconnect", False))
+        # 1. Disconnect / Reconnect control (also disconnects during broker_outage crisis)
+        want_disconnect = bool(sec_ctrl.get("disconnect", False)) or crisis == "broker_outage"
         with lock:
             cur_disc = state["simulated_disconnect"]
             if want_disconnect != cur_disc:
@@ -301,6 +308,22 @@ def run_esp32_node(sector_id: int) -> None:
                         pass
                 else:
                     logger.info("SIM RECOVERY: Node reconnect triggered.")
+
+        # 1b. Per-sensor faults (moisture, temperature, humidity, light_lux, flow)
+        s_faults = sec_ctrl.get("sensor_faults", {})
+        if isinstance(s_faults, dict):
+            for s_name in ("moisture", "temperature", "humidity", "light_lux"):
+                mode = s_faults.get(s_name, "ok")
+                if sensor_sim.get_sensor_faults(sector_id).get(s_name) != mode:
+                    sensor_sim.set_sensor_fault(sector_id, s_name, mode)
+            with lock:
+                state["flow_sensor_fault"] = s_faults.get("flow", "ok")
+
+        # 1c. Granular valve fault mode (normal, stuck_closed, stuck_open, no_ack, leak)
+        v_fault_mode = sec_ctrl.get("valve_fault_mode", "normal")
+        if irrigation.get_status(sector_id).get("fault_mode") != v_fault_mode:
+            irrigation.set_valve_fault_mode(sector_id, v_fault_mode)
+            logger.warning("SIM VALVE FAULT MODE set to '%s' on sector %d.", v_fault_mode, sector_id)
 
         # 2. Fault injection (keyed by fault_nonce)
         fault_nonce = sec_ctrl.get("fault_nonce")
@@ -394,27 +417,55 @@ def run_esp32_node(sector_id: int) -> None:
                             with lock:
                                 state["delay_seconds"] = 0.0
 
+                        def _r(val, digits=2):
+                            return round(float(val), digits) if isinstance(val, (int, float)) else None
+
+                        with lock:
+                            flow_fault = state.get("flow_sensor_fault", "ok")
+                            cur_crisis = state.get("crisis", "normal")
+
+                        eff_flow = float(valve_status.get("effective_flow_lpm", 0.0))
+                        if flow_fault == "missing":
+                            eff_flow_out = None
+                        elif flow_fault == "invalid":
+                            eff_flow_out = -9.9
+                        elif flow_fault == "stale":
+                            eff_flow_out = state.setdefault("frozen_flow", eff_flow)
+                        elif flow_fault == "noisy":
+                            eff_flow_out = round(eff_flow + 4.5, 2)
+                        else:
+                            state.pop("frozen_flow", None)
+                            eff_flow_out = round(eff_flow, 2)
+
+                        sensor_health = sensor_sim.get_sensor_faults(sector_id)
+                        sensor_health["flow"] = flow_fault
+
                         payload = {
                             "node_id": node_id,
                             "sector_id": sector_id,
-                            "moisture": round(float(reading["moisture"]), 2),
-                            "temperature": round(float(reading["temperature"]), 2),
-                            "humidity": round(float(reading["humidity"]), 2),
-                            "light_lux": round(float(reading["light_lux"]), 1),
+                            "moisture": _r(reading["moisture"], 2),
+                            "temperature": _r(reading["temperature"], 2),
+                            "humidity": _r(reading["humidity"], 2),
+                            "light_lux": _r(reading["light_lux"], 1),
                             "timestamp": reading["timestamp"],
                             "sequence_number": reading["sequence_number"],
                             "valve_state": valve_status["valve_state"],
-                            "flow_rate_lpm": valve_status["flow_rate_lpm"],
+                            "valve_fault_mode": valve_status.get("fault_mode", "normal"),
+                            "flow_rate_lpm": eff_flow_out,
+                            "nominal_flow_rate_lpm": valve_status["flow_rate_lpm"],
                             "water_consumed_litres": valve_status["water_consumed_litres"],
+                            "sensor_health": sensor_health,
+                            "crisis": cur_crisis,
                         }
                         publish_json(topic_sensors, payload, qos=1, retain=False)
                         logger.info(
-                            "Telemetry seq=%s moisture=%.1f%% temp=%.1fC hum=%.1f%% valve=%s water=%.2fL",
+                            "Telemetry seq=%s m=%s t=%s h=%s valve=%s flow=%s water=%.2fL",
                             payload["sequence_number"],
                             payload["moisture"],
                             payload["temperature"],
                             payload["humidity"],
                             payload["valve_state"],
+                            payload["flow_rate_lpm"],
                             payload["water_consumed_litres"],
                         )
                 except Exception as exc:

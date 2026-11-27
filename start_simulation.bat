@@ -59,13 +59,19 @@ start "ESP32 Sector 3" /D "%~dp0" cmd /k %PY_CMD% esp32_nodes\esp32_sector_3.py
 start "ESP32 Sector 4" /D "%~dp0" cmd /k %PY_CMD% esp32_nodes\esp32_sector_4.py
 ping -n 4 127.0.0.1 >nul
 
-REM --- 6. Start Streamlit Dashboard ---
-echo [INFO] Starting Dashboard on http://localhost:8501 ...
-start "Dashboard" /D "%~dp0" cmd /k %PY_CMD% -m streamlit run dashboard\app.py --server.port 8501 --server.headless true
+REM --- 6. Start 3D Web Simulation (Three.js + Anime.js) on port 8080 ---
+echo [INFO] Starting 3D Web Simulation on http://localhost:8080 ...
+start "3D Web Sim" /D "%~dp0" cmd /k %PY_CMD% web_sim\server.py
+
+REM --- 7. Start Streamlit Dashboard on port 8501 ---
+echo [INFO] Starting Streamlit Dashboard on http://localhost:8501 ...
+start "Dashboard" /D "%~dp0" cmd /k %PY_CMD% -m streamlit run dashboard\app.py --server.port 8501 --server.headless true --browser.gatherUsageStats false
 
 echo.
 echo ============================================================
-echo   System started! Dashboard at http://localhost:8501
+echo   System started:
+echo     - 3D Web Sim  : http://localhost:8080
+echo     - Streamlit   : http://localhost:8501
 echo ============================================================
 echo   To stop everything cleanly, run: stop_simulation.bat
 echo ============================================================

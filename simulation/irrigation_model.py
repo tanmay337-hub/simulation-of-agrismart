@@ -19,6 +19,9 @@ VALVE_FAULT_DURATION_S: float = 30.0      # seconds a faulty valve ignores comma
 SECONDS_PER_MINUTE: float = 60.0
 
 
+VALVE_FAULT_MODES = {"normal", "stuck_closed", "stuck_open", "no_ack", "leak"}
+
+
 class _SectorValve:
     """Internal valve + metering state for one sector."""
 
@@ -31,6 +34,7 @@ class _SectorValve:
         "last_ack_time",
         "ack_pending",
         "_fault_until",   # monotonic epoch: valve ignores commands until this time
+        "fault_mode",     # normal | stuck_closed | stuck_open | no_ack | leak
     )
 
     def __init__(self, sector_id: int, flow_rate_lpm: float) -> None:
@@ -42,10 +46,11 @@ class _SectorValve:
         self.last_ack_time: Optional[float]     = None
         self.ack_pending: bool          = False
         self._fault_until: float        = 0.0
+        self.fault_mode: str            = "normal"
 
     @property
     def is_faulted(self) -> bool:
-        return time.monotonic() < self._fault_until
+        return time.monotonic() < self._fault_until or self.fault_mode != "normal"
 
 
 class IrrigationModel:
@@ -69,6 +74,7 @@ class IrrigationModel:
     ) -> None:
         self._default_flow_rate = flow_rate_lpm
         self._sectors: Dict[int, _SectorValve] = {}
+        self.water_supply_failed: bool = False
         for sid in (sector_ids or []):
             self._ensure_sector(sid)
         logger.info(
@@ -76,6 +82,19 @@ class IrrigationModel:
             len(self._sectors),
             flow_rate_lpm,
         )
+
+    def set_valve_fault_mode(self, sector_id: int, mode: str) -> bool:
+        """Set persistent granular valve fault mode."""
+        if mode not in VALVE_FAULT_MODES:
+            return False
+        valve = self._ensure_sector(sector_id)
+        valve.fault_mode = mode
+        if mode == "normal":
+            valve._fault_until = 0.0
+        return True
+
+    def set_water_supply_failed(self, failed: bool) -> None:
+        self.water_supply_failed = bool(failed)
 
     # ------------------------------------------------------------------
     # Valve control
@@ -89,13 +108,14 @@ class IrrigationModel:
         """
         valve = self._ensure_sector(sector_id)
         now = time.monotonic()
-        if valve.is_faulted:
-            remaining = valve._fault_until - now
-            logger.warning(
-                "Sector %d: open_valve ignored — valve is faulted for another %.1fs.",
-                sector_id,
-                remaining,
-            )
+        if time.monotonic() < valve._fault_until or valve.fault_mode == "stuck_closed":
+            logger.warning("Sector %d: open_valve failed — valve fault (%s).", sector_id, valve.fault_mode)
+            return False
+        if valve.fault_mode == "no_ack":
+            # Valve physically changes or attempts to move, but ACK must be suppressed by node
+            valve.valve_state = "OPEN"
+            valve.last_command_time = now
+            valve.ack_pending = True
             return False
         if valve.valve_state == "OPEN":
             logger.debug("Sector %d: valve already OPEN.", sector_id)
@@ -115,13 +135,13 @@ class IrrigationModel:
         """
         valve = self._ensure_sector(sector_id)
         now = time.monotonic()
-        if valve.is_faulted:
-            remaining = valve._fault_until - now
-            logger.warning(
-                "Sector %d: close_valve ignored — valve is faulted for another %.1fs.",
-                sector_id,
-                remaining,
-            )
+        if time.monotonic() < valve._fault_until or valve.fault_mode == "stuck_open":
+            logger.warning("Sector %d: close_valve failed — valve fault (%s).", sector_id, valve.fault_mode)
+            return False
+        if valve.fault_mode == "no_ack":
+            valve.valve_state = "CLOSED"
+            valve.last_command_time = now
+            valve.ack_pending = True
             return False
         if valve.valve_state == "CLOSED":
             logger.debug("Sector %d: valve already CLOSED.", sector_id)
@@ -137,25 +157,28 @@ class IrrigationModel:
     # Time-step
     # ------------------------------------------------------------------
 
+    def effective_flow_lpm(self, valve: _SectorValve) -> float:
+        if self.water_supply_failed:
+            return 0.0
+        if valve.valve_state == "OPEN":
+            return valve.flow_rate_lpm
+        if valve.fault_mode == "leak":
+            return round(valve.flow_rate_lpm * 0.4, 2)
+        return 0.0
+
     def tick(self, elapsed_seconds: float) -> None:
         """
         Advance the model by *elapsed_seconds*.
 
-        Accumulates water consumption for every OPEN valve.
-        Should be called by the master controller at each update cycle.
+        Accumulates water consumption for every OPEN or leaking valve.
         """
         if elapsed_seconds <= 0:
             return
         for valve in self._sectors.values():
-            if valve.valve_state == "OPEN":
-                litres = valve.flow_rate_lpm * (elapsed_seconds / SECONDS_PER_MINUTE)
+            eff = self.effective_flow_lpm(valve)
+            if eff > 0.0:
+                litres = eff * (elapsed_seconds / SECONDS_PER_MINUTE)
                 valve.water_consumed_litres += litres
-                logger.debug(
-                    "Sector %d: +%.4f L (total %.3f L).",
-                    valve.sector_id,
-                    litres,
-                    valve.water_consumed_litres,
-                )
 
     # ------------------------------------------------------------------
     # Status / query
@@ -164,21 +187,21 @@ class IrrigationModel:
     def get_status(self, sector_id: int) -> Dict[str, Any]:
         """
         Return the current status dict for *sector_id*.
-
-        Keys: valve_state, flow_rate_lpm, water_consumed_litres, is_irrigating,
-              last_command_time, last_ack_time, ack_pending, is_faulted.
         """
         valve = self._ensure_sector(sector_id)
+        eff_flow = self.effective_flow_lpm(valve)
         return {
             "sector_id":              valve.sector_id,
             "valve_state":            valve.valve_state,
             "flow_rate_lpm":          valve.flow_rate_lpm,
+            "effective_flow_lpm":     eff_flow,
             "water_consumed_litres":  round(valve.water_consumed_litres, 4),
             "is_irrigating":          valve.valve_state == "OPEN",
             "last_command_time":      valve.last_command_time,
             "last_ack_time":          valve.last_ack_time,
             "ack_pending":            valve.ack_pending,
             "is_faulted":             valve.is_faulted,
+            "fault_mode":             valve.fault_mode,
         }
 
     def get_total_water_consumed(self) -> float:
@@ -212,6 +235,7 @@ class IrrigationModel:
         """Immediately clear any active valve fault for *sector_id*."""
         valve = self._ensure_sector(sector_id)
         valve._fault_until = 0.0
+        valve.fault_mode = "normal"
         logger.info("Sector %d: valve fault cleared.", sector_id)
 
     # ------------------------------------------------------------------

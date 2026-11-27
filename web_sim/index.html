@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AgriSmart Field Sim — 3D Distributed IoT Irrigation</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=Silkscreen:wght@400;700&family=Space+Grotesk:wght@500;700&display=swap"
+    rel="stylesheet"
+  />
+
+  <link rel="stylesheet" href="styles.css" />
+
+  <!-- Anime.js -->
+  <script src="https://cdn.jsdelivr.net/npm/animejs@3.2.2/lib/anime.min.js"></script>
+
+  <!-- Three.js ESM Import Map -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <!-- TOP HEADER BAR -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-badge">16-BIT SIM</div>
+      <div>
+        <h1>AGRISMART FIELD SIMULATOR</h1>
+        <p class="subtitle">4 Field ESP32 Nodes (3D Farmland) + Mosquitto MQTT + Off-Site Raspberry Pi 5</p>
+      </div>
+    </div>
+
+    <div class="topbar-status">
+      <div class="stat-pill" id="mode-pill">
+        <span class="dot" id="backend-dot"></span>
+        <span id="backend-label">Connecting...</span>
+      </div>
+      <div class="stat-pill">
+        <span>ONLINE NODES:</span>
+        <strong id="kpi-nodes">0 / 4</strong>
+      </div>
+      <div class="stat-pill">
+        <span>OPEN VALVES:</span>
+        <strong id="kpi-valves">0 / 4</strong>
+      </div>
+      <div class="stat-pill">
+        <span>WATER USED:</span>
+        <strong id="kpi-water">0.00 L</strong>
+      </div>
+      <button class="btn btn-danger" id="btn-emergency">⛔ ALL VALVES OFF</button>
+      <button class="btn btn-leaf" id="btn-restore-all">♻️ RESTORE ALL</button>
+    </div>
+  </header>
+
+  <!-- ENVIRONMENTAL DEFECTS & FARM CRISES BAR -->
+  <section class="crisis-bar">
+    <div class="crisis-title">
+      <span>🌦️ ENVIRONMENT &amp; FARM CRISIS</span>
+      <span class="crisis-badge" id="active-crisis-badge">NORMAL SUNNY DAY</span>
+    </div>
+    <div class="crisis-buttons" id="crisis-buttons">
+      <button class="btn-chip active" data-crisis="normal">☀️ Normal Day</button>
+      <button class="btn-chip" data-crisis="heatwave">🔥 Heatwave &amp; Drought</button>
+      <button class="btn-chip" data-crisis="rainstorm">🌧️ Heavy Rainstorm</button>
+      <button class="btn-chip" data-crisis="frost">❄️ Frost Cold Snap</button>
+      <button class="btn-chip" data-crisis="water_supply_failure">🚱 Pump / Water Failure</button>
+      <button class="btn-chip" data-crisis="broker_outage">📡 MQTT Broker Outage</button>
+    </div>
+  </section>
+
+  <!-- MAIN WORKSPACE GRID -->
+  <main class="main-grid">
+    <!-- LEFT COLUMN: 3D FARMLAND + OFF-SITE RPi 5 SAFE LINK -->
+    <section class="left-pane">
+      <div class="panel viewport-panel">
+        <div class="panel-head">
+          <div>
+            <h2>🌾 INTERACTIVE 3D FARMLAND (FIELD HARDWARE ONLY)</h2>
+            <span class="hint">Drag to orbit · Scroll to zoom · Click any sector, ESP32 box, sensor or valve</span>
+          </div>
+          <div class="cam-presets">
+            <button class="btn-mini active" data-cam="overview">Overview</button>
+            <button class="btn-mini" data-cam="1">Sec 1</button>
+            <button class="btn-mini" data-cam="2">Sec 2</button>
+            <button class="btn-mini" data-cam="3">Sec 3</button>
+            <button class="btn-mini" data-cam="4">Sec 4</button>
+            <button class="btn-mini" data-cam="top">Map</button>
+          </div>
+        </div>
+
+        <div class="canvas-wrap" id="canvas-wrap">
+          <canvas id="farm3d-canvas"></canvas>
+          <div class="hud-overlay" id="hud-tooltip">Click a sector in 3D to inspect ESP32 &amp; sensors</div>
+          <div class="crisis-banner-3d hidden" id="crisis-banner-3d"></div>
+        </div>
+
+        <div class="legend-strip">
+          <span><i class="swatch s-green"></i> Healthy / Irrigating</span>
+          <span><i class="swatch s-amber"></i> Sensor Fault / Stale</span>
+          <span><i class="swatch s-red"></i> Offline / Valve Fault</span>
+          <span><i class="swatch s-blue"></i> Water Flow / MQTT Packet</span>
+          <span class="note-safe">🛡️ Note: Raspberry Pi 5 is NOT in the field (see Off-Site Safe Rack below)</span>
+        </div>
+      </div>
+
+      <!-- OFF-SITE SAFE CONTROL ROOM (RASPBERRY PI 5) -->
+      <div class="panel rpi-panel">
+        <div class="panel-head">
+          <div>
+            <h2>🏠 OFF-SITE SAFE CONTROL ROOM — RASPBERRY PI 5</h2>
+            <span class="hint">Protected indoors away from rain, heat, &amp; pipe leaks · Deterministic Rule Engine</span>
+          </div>
+          <div class="rpi-status-badge" id="rpi-status-badge">RPi 5: ONLINE</div>
+        </div>
+
+        <div class="mqtt-link-diagram" id="mqtt-link-diagram">
+          <div class="link-node">
+            <strong>4× Field ESP32s</strong>
+            <small>In muddy crop sectors</small>
+          </div>
+          <div class="link-wire" id="wire-up">
+            <span class="wire-label">farm/sector+/sensors &amp; status</span>
+            <div class="packet-track" id="track-up"></div>
+          </div>
+          <div class="link-node broker-node">
+            <strong>Mosquitto</strong>
+            <small>Broker :1883</small>
+          </div>
+          <div class="link-wire" id="wire-down">
+            <span class="wire-label">farm/sector+/command</span>
+            <div class="packet-track" id="track-down"></div>
+          </div>
+          <div class="link-node rpi-node">
+            <strong>RPi 5 Master</strong>
+            <small>Safe Indoor Rack</small>
+          </div>
+        </div>
+
+        <div class="rpi-reactions" id="rpi-reactions">
+          <!-- Populated dynamically with RPi 5 rule decision per sector -->
+        </div>
+      </div>
+    </section>
+
+    <!-- RIGHT COLUMN: ESP32 SENSORS, VALVE FAULTS & CONTROLS -->
+    <section class="right-pane">
+      <!-- SECTOR TABS -->
+      <div class="panel inspector-panel">
+        <div class="panel-head">
+          <h2>🔌 ESP32 NODE &amp; SENSOR INSPECTOR</h2>
+          <div class="sector-tabs" id="sector-tabs">
+            <button class="sec-tab active" data-sector="1">Sector 1</button>
+            <button class="sec-tab" data-sector="2">Sector 2</button>
+            <button class="sec-tab" data-sector="3">Sector 3</button>
+            <button class="sec-tab" data-sector="4">Sector 4</button>
+          </div>
+        </div>
+
+        <!-- SELECTED SECTOR SUMMARY + LINK / MODE -->
+        <div class="esp-header-card" id="esp-header-card">
+          <div>
+            <div class="esp-title-row">
+              <strong id="sel-node-name">ESP32_SECTOR_1 (Tomato Plot)</strong>
+              <span class="pill" id="sel-node-pill">ONLINE</span>
+            </div>
+            <div class="esp-meta" id="sel-node-meta">Seq #0 · Last packet: 0s ago · Valve: CLOSED</div>
+          </div>
+          <div class="esp-actions">
+            <button class="btn btn-sm" id="btn-toggle-node">✂️ Disconnect ESP32</button>
+            <button class="btn btn-sm" id="btn-toggle-mode">Mode: AUTO</button>
+          </div>
+        </div>
+
+        <!-- MANUAL VALVE BUTTONS (VISIBLE WHEN MANUAL MODE OR QUICK OVERRIDE) -->
+        <div class="manual-valve-bar" id="manual-valve-bar">
+          <span>Manual Valve Control (only active in MANUAL mode):</span>
+          <div>
+            <button class="btn btn-leaf btn-sm" id="btn-valve-open">OPEN Valve</button>
+            <button class="btn btn-danger btn-sm" id="btn-valve-close">CLOSE Valve</button>
+          </div>
+        </div>
+
+        <!-- ALL 5 INDIVIDUAL SENSORS CONNECTED TO THIS ESP32 (TOGGLEABLE FAULTS!) -->
+        <div class="sub-head">
+          <h3>📡 Sensors Connected to <span id="sensors-esp-label">ESP32-1</span> (Toggle Faults to Test RPi 5)</h3>
+        </div>
+        <div class="sensors-list" id="sensors-list">
+          <!-- 5 Sensor rows injected here -->
+        </div>
+
+        <!-- VALVE FAULT SIMULATOR -->
+        <div class="sub-head">
+          <h3>🚰 Solenoid Valve Hardware State &amp; Faults</h3>
+        </div>
+        <div class="valve-control-box">
+          <div class="valve-readout">
+            <span>Confirmed Valve: <strong id="sel-valve-state">CLOSED</strong></span>
+            <span>Desired by RPi 5: <strong id="sel-valve-desired">CLOSED</strong></span>
+            <span>Total Water: <strong id="sel-valve-water">0.00 L</strong></span>
+          </div>
+          <div class="valve-fault-row">
+            <label for="sel-valve-fault">Inject Valve Fault:</label>
+            <select id="sel-valve-fault">
+              <option value="normal">✅ Normal (Responsive)</option>
+              <option value="stuck_closed">🔒 Stuck Closed (Won't Open)</option>
+              <option value="stuck_open">🌊 Stuck Open (Won't Close)</option>
+              <option value="no_ack">🔇 No ACK (Command Timeout)</option>
+              <option value="leak">💧 Pipe / Seal Leak</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- MANUAL SENSOR VALUE SLIDERS -->
+        <div class="sub-head">
+          <h3>🎛️ Override Live Field Conditions</h3>
+        </div>
+        <div class="slider-grid">
+          <label>Moisture: <span id="lbl-sl-m">22%</span>
+            <input type="range" id="sl-moisture" min="0" max="100" value="22" />
+          </label>
+          <label>Temp: <span id="lbl-sl-t">29°C</span>
+            <input type="range" id="sl-temp" min="-5" max="50" value="29" />
+          </label>
+          <label>Humidity: <span id="lbl-sl-h">48%</span>
+            <input type="range" id="sl-humidity" min="0" max="100" value="48" />
+          </label>
+          <button class="btn btn-sm btn-amber" id="btn-apply-sliders">Apply to Node</button>
+        </div>
+      </div>
+
+      <!-- RULE ENGINE THRESHOLDS -->
+      <div class="panel rules-panel">
+        <div class="panel-head">
+          <h2>📏 RPi 5 Rule Thresholds (Deterministic)</h2>
+        </div>
+        <div class="rules-grid">
+          <label>Start &lt; (%) <input type="number" id="in-start" value="30" min="0" max="100" /></label>
+          <label>Stop &gt; (%) <input type="number" id="in-stop" value="55" min="0" max="100" /></label>
+          <label>Temp Alert (°C) <input type="number" id="in-temp" value="35" min="0" max="60" /></label>
+          <label>Hum Alert (%) <input type="number" id="in-hum" value="35" min="0" max="100" /></label>
+          <label>Flow (L/min) <input type="number" id="in-flow" value="2.0" min="0.5" max="20" step="0.5" /></label>
+          <button class="btn btn-sm btn-leaf" id="btn-save-rules">Save Rules</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- BOTTOM: REAL-TIME TELEMETRY PLOTS & ALL-PROGRAM ACTIVITY LOG -->
+  <section class="telemetry-section">
+    <div class="panel charts-panel">
+      <div class="panel-head">
+        <h2>📈 REAL-TIME TELEMETRY PLOTS (ALL SECTORS &amp; PROGRAM ACTIVITY)</h2>
+        <div class="chart-legend">
+          <span class="leg s1">■ Sec 1</span>
+          <span class="leg s2">■ Sec 2</span>
+          <span class="leg s3">■ Sec 3</span>
+          <span class="leg s4">■ Sec 4</span>
+        </div>
+      </div>
+      <div class="charts-grid">
+        <div class="chart-box">
+          <div class="chart-title">Soil Moisture (%) — with 30% Start &amp; 55% Stop Hysteresis</div>
+          <canvas id="chart-moisture"></canvas>
+        </div>
+        <div class="chart-box">
+          <div class="chart-title">Temperature (°C) &amp; Environmental Shifts</div>
+          <canvas id="chart-temp"></canvas>
+        </div>
+        <div class="chart-box">
+          <div class="chart-title">Water Flow Rate (L/min) &amp; Valve Activity</div>
+          <canvas id="chart-flow"></canvas>
+        </div>
+        <div class="chart-box">
+          <div class="chart-title">Program Activity Rate (Telemetry / Commands / ACKs / Faults)</div>
+          <canvas id="chart-activity"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel log-panel">
+      <div class="panel-head">
+        <h2>📜 LIVE MQTT &amp; PROGRAM ACTIVITY STREAM</h2>
+        <div class="log-filters">
+          <select id="log-filter-sector">
+            <option value="all">All Sectors</option>
+            <option value="1">Sector 1</option>
+            <option value="2">Sector 2</option>
+            <option value="3">Sector 3</option>
+            <option value="4">Sector 4</option>
+          </select>
+          <select id="log-filter-kind">
+            <option value="all">All Events</option>
+            <option value="SENSORS">Sensor Telemetry</option>
+            <option value="COMMAND">Commands</option>
+            <option value="ACK">Node ACKs</option>
+            <option value="ALERT">Alerts &amp; Faults</option>
+          </select>
+        </div>
+      </div>
+      <div class="log-feed" id="log-feed">
+        <!-- Populated in real time -->
+      </div>
+    </div>
+  </section>
+
+  <!-- MODULE ENTRYPOINT -->
+  <script type="module" src="app.js"></script>
+</body>
+</html>

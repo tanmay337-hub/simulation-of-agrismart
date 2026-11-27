@@ -38,6 +38,8 @@ VALID_RANGES = {
 }
 
 FAULT_TYPES = {"stale", "invalid", "missing", "noise_spike"}
+SENSOR_FAULT_MODES = {"ok", "missing", "stale", "invalid", "noisy"}
+CRISIS_MODES = {"normal", "heatwave", "rainstorm", "frost", "water_supply_failure", "broker_outage"}
 
 
 class SectorState:
@@ -53,9 +55,18 @@ class SectorState:
         self.sequence_number: int = 0
 
         # fault flags
-        self.fault: Optional[str] = None      # active fault type
+        self.fault: Optional[str] = None      # active whole-node fault type
         self.stale_until: float   = 0.0       # epoch; stale freeze until this time
         self.frozen_reading: Optional[Dict[str, Any]] = None   # last reading before freeze
+
+        # individual per-sensor fault modes & frozen values
+        self.sensor_faults: Dict[str, str] = {
+            "moisture": "ok",
+            "temperature": "ok",
+            "humidity": "ok",
+            "light_lux": "ok",
+        }
+        self.frozen_sensor_values: Dict[str, float] = {}
 
     def snapshot(self) -> Dict[str, Any]:
         """Return a plain-dict snapshot of current values (no fault logic)."""
@@ -92,10 +103,32 @@ class SensorSimulator:
         self._config_path = Path(config_path)
         self._irrigation_model = irrigation_model  # may be None
         self._sectors: Dict[int, SectorState] = {}
+        self._crisis_mode: str = "normal"
         self._load_config()
         logger.info(
             "SensorSimulator initialised with %d sectors.", len(self._sectors)
         )
+
+    def set_crisis_mode(self, crisis: str) -> None:
+        """Set farm-wide environmental crisis mode."""
+        if crisis in CRISIS_MODES:
+            self._crisis_mode = crisis
+
+    def set_sensor_fault(self, sector_id: int, sensor_name: str, mode: str) -> bool:
+        """Set fault mode ('ok','missing','stale','invalid','noisy') on one sensor."""
+        state = self._get_state(sector_id)
+        if state is None or sensor_name not in state.sensor_faults or mode not in SENSOR_FAULT_MODES:
+            return False
+        state.sensor_faults[sensor_name] = mode
+        if mode == "stale":
+            state.frozen_sensor_values[sensor_name] = float(getattr(state, sensor_name))
+        else:
+            state.frozen_sensor_values.pop(sensor_name, None)
+        return True
+
+    def get_sensor_faults(self, sector_id: int) -> Dict[str, str]:
+        state = self._get_state(sector_id)
+        return dict(state.sensor_faults) if state else {}
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -137,10 +170,11 @@ class SensorSimulator:
                 logger.info("Sector %d: stale fault expired; resuming updates.", sid)
 
             valve_open = self._valve_is_open(sid)
-            self._apply_moisture_drift(state, valve_open)
-            self._drift_temperature(state)
-            self._drift_humidity(state)
-            self._drift_light(state)
+            supply_ok = True
+            if self._irrigation_model is not None and hasattr(self._irrigation_model, "get_status"):
+                st_info = self._irrigation_model.get_status(sid)
+                supply_ok = float(st_info.get("effective_flow_lpm", st_info.get("flow_rate_lpm", 2.0))) > 0.0
+            self._apply_environmental_physics(state, valve_open and supply_ok)
             self.add_gaussian_noise(state)
             self._clamp(state)
             state.sequence_number += 1
@@ -189,7 +223,20 @@ class SensorSimulator:
             logger.debug("Sector %d fault=invalid emitted, cleared.", sector_id)
             return reading
 
-        return state.snapshot()
+        snap = state.snapshot()
+        # Apply individual per-sensor faults without hiding healthy channels
+        bad_vals = {"moisture": 148.0, "temperature": -45.0, "humidity": -12.0, "light_lux": -500.0}
+        noisy_sigmas = {"moisture": 12.0, "temperature": 8.0, "humidity": 15.0, "light_lux": 18000.0}
+        for s_name, s_mode in state.sensor_faults.items():
+            if s_mode == "missing":
+                snap[s_name] = None
+            elif s_mode == "stale":
+                snap[s_name] = round(state.frozen_sensor_values.get(s_name, snap[s_name]), 3)
+            elif s_mode == "invalid":
+                snap[s_name] = bad_vals[s_name]
+            elif s_mode == "noisy":
+                snap[s_name] = round(float(snap[s_name]) + random.gauss(0, noisy_sigmas[s_name]), 2)
+        return snap
 
     def set_manual_value(self, sector_id: int, field: str, value: float) -> bool:
         """
@@ -276,6 +323,9 @@ class SensorSimulator:
         state.fault = None
         state.stale_until = 0.0
         state.frozen_reading = None
+        for k in state.sensor_faults:
+            state.sensor_faults[k] = "ok"
+        state.frozen_sensor_values.clear()
         logger.info("Sector %d: fault cleared.", sector_id)
         return True
 
@@ -298,6 +348,35 @@ class SensorSimulator:
             return status.get("valve_state") == "OPEN"
         except Exception:
             return False
+
+    def _apply_environmental_physics(self, state: SectorState, irrigating_with_flow: bool) -> None:
+        crisis = self._crisis_mode
+        if crisis == "heatwave":
+            if irrigating_with_flow:
+                state.moisture += 0.25
+            else:
+                state.moisture -= 0.95
+            state.temperature += (42.0 - state.temperature) * 0.08 + random.gauss(0, 0.05)
+            state.humidity += (18.0 - state.humidity) * 0.08 + random.gauss(0, 0.06)
+            state.light_lux += (78000.0 - state.light_lux) * 0.08
+        elif crisis == "rainstorm":
+            state.moisture += 0.75 + (0.45 if irrigating_with_flow else 0.0)
+            state.temperature += (21.0 - state.temperature) * 0.07 + random.gauss(0, 0.04)
+            state.humidity += (94.0 - state.humidity) * 0.10 + random.gauss(0, 0.05)
+            state.light_lux += (4500.0 - state.light_lux) * 0.15
+        elif crisis == "frost":
+            if irrigating_with_flow:
+                state.moisture += 0.45
+            else:
+                state.moisture -= 0.10
+            state.temperature += (1.0 - state.temperature) * 0.10 + random.gauss(0, 0.04)
+            state.humidity += (82.0 - state.humidity) * 0.06
+            state.light_lux += (14000.0 - state.light_lux) * 0.10
+        else:
+            self._apply_moisture_drift(state, irrigating_with_flow)
+            self._drift_temperature(state)
+            self._drift_humidity(state)
+            self._drift_light(state)
 
     @staticmethod
     def _apply_moisture_drift(state: SectorState, valve_open: bool) -> None:
