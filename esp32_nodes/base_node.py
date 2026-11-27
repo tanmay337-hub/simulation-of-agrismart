@@ -138,7 +138,7 @@ def run_esp32_node(sector_id: int) -> None:
             "node_id": node_id,
             "status": status,
             "valve_state": valve_info["valve_state"],
-            "flow_rate_lpm": valve_info["flow_rate_lpm"],
+            "flow_rate_lpm": valve_info["effective_flow_lpm"],
             "water_consumed_litres": valve_info["water_consumed_litres"],
             "timestamp": _now_iso(),
             "reason": reason,

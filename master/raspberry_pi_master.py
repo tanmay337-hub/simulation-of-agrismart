@@ -353,6 +353,16 @@ class RaspberryPiMaster:
                 state["valve_fault_mode"] = data.get("valve_fault_mode", "normal")
                 if "water_consumed_litres" in data and isinstance(data["water_consumed_litres"], (int, float)):
                     state["water_consumed_litres"] = float(data["water_consumed_litres"])
+                # Keep valid flow readings fresh even when another channel is faulted
+                flow_val = data.get("flow_rate_lpm")
+                if (
+                    "flow" not in ch_errors
+                    and isinstance(flow_val, (int, float))
+                    and not isinstance(flow_val, bool)
+                    and not math.isnan(flow_val)
+                    and not math.isinf(flow_val)
+                ):
+                    state["flow_rate_lpm"] = float(flow_val)
                 if not state["pending_cmds"] and data.get("valve_state") in ("OPEN", "CLOSED"):
                     state["valve_state"] = data["valve_state"]
 
@@ -429,7 +439,8 @@ class RaspberryPiMaster:
                 self._db.resolve_alerts(sector_id=sid, alert_type="node_offline")
                 self._db.resolve_alerts(sector_id=sid, alert_type="stale_data")
                 self._db.resolve_alerts(sector_id=sid, alert_type="invalid_sensor_data")
-                self._db.resolve_alerts(sector_id=sid, alert_type="moisture_sensor_fault")
+                if not isinstance(reported_health, dict) or reported_health.get("moisture", "ok") == "ok":
+                    self._db.resolve_alerts(sector_id=sid, alert_type="moisture_sensor_fault")
                 self._db.insert_sensor_reading(sector_id=sid, reading_dict=data, timestamp=_now_iso())
 
     def _handle_status_message(self, sid: int, data: dict[str, Any]) -> None:
@@ -688,7 +699,6 @@ class RaspberryPiMaster:
                 continue
 
             # Safety lock if moisture sensor itself is faulty or stale
-            s_health = state.get("sensor_health", {}) if isinstance(state, dict) else {}
             with self._lock:
                 s_health = dict(self._sector_state[sid].get("sensor_health", {}))
                 ch_errs = dict(self._sector_state[sid].get("channel_errors", {}))
@@ -966,7 +976,14 @@ class RaspberryPiMaster:
         try:
             with open(tmp_path, "w", encoding="utf-8") as fh:
                 json.dump(status, fh, indent=2, default=str)
-            os.replace(tmp_path, STATE_FILE)
+            for attempt in range(4):
+                try:
+                    os.replace(tmp_path, STATE_FILE)
+                    break
+                except PermissionError:
+                    if attempt == 3:
+                        raise
+                    time.sleep(0.02)
         except OSError as exc:
             logger.error("Failed to write state file: %s", exc)
 
