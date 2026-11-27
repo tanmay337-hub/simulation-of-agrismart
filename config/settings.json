@@ -1,0 +1,52 @@
+{
+  "mqtt": {
+    "broker": "localhost",
+    "port": 1883,
+    "keepalive": 60
+  },
+  "thresholds": {
+    "moisture_start": 30,
+    "moisture_stop": 55,
+    "temp_alert": 35,
+    "humidity_alert": 35
+  },
+  "flow_rate_lpm": 2.0,
+  "sensor_publish_interval": 5,
+  "stale_data_timeout": 30,
+  "node_offline_timeout": 60,
+  "failsafe_timeout": 90,
+  "sectors": [
+    {
+      "id": 1,
+      "name": "Sector 1",
+      "initial_moisture": 22,
+      "initial_temperature": 29,
+      "initial_humidity": 48
+    },
+    {
+      "id": 2,
+      "name": "Sector 2",
+      "initial_moisture": 68,
+      "initial_temperature": 32,
+      "initial_humidity": 42
+    },
+    {
+      "id": 3,
+      "name": "Sector 3",
+      "initial_moisture": 37,
+      "initial_temperature": 36,
+      "initial_humidity": 31
+    },
+    {
+      "id": 4,
+      "name": "Sector 4",
+      "initial_moisture": 18,
+      "initial_temperature": 27,
+      "initial_humidity": 55
+    }
+  ],
+  "logging": {
+    "level": "INFO",
+    "file": "logs/system.log"
+  }
+}
