@@ -186,6 +186,9 @@ class RaspberryPiMaster:
         self._last_alert_sent: dict[tuple[Any, str], float] = {}
         self._broker_connected = False
         self._running = False
+        self._current_crisis = "normal"
+        self._urgent_sync_until = 0.0
+        self._wake_event = threading.Event()
 
         self._decision_engine: DecisionEngine | None = None
         self._mqtt: MQTTManager | None = None
@@ -351,6 +354,11 @@ class RaspberryPiMaster:
                 state["sensor_health"] = dict(reported_health)
             if isinstance(data, dict):
                 state["valve_fault_mode"] = data.get("valve_fault_mode", "normal")
+                if "crisis" in data and data["crisis"] != self._current_crisis:
+                    self._current_crisis = str(data["crisis"])
+                    self._wake_event.set()
+                elif now < self._urgent_sync_until:
+                    self._wake_event.set()
                 if "water_consumed_litres" in data and isinstance(data["water_consumed_litres"], (int, float)):
                     state["water_consumed_litres"] = float(data["water_consumed_litres"])
                 # Keep valid flow readings fresh even when another channel is faulted
@@ -468,9 +476,12 @@ class RaspberryPiMaster:
                     latency,
                 )
             if status in ("ACCEPTED", "ONLINE") and valve_state in ("OPEN", "CLOSED"):
+                prev_v = state["valve_state"]
                 state["valve_state"] = valve_state
                 state["last_seen"] = _now_ts()
                 state["node_online"] = True
+                if prev_v != valve_state or _now_ts() < self._urgent_sync_until:
+                    self._wake_event.set()
             elif status == "OFFLINE":
                 state["node_online"] = False
                 if valve_state in ("OPEN", "CLOSED"):
@@ -573,8 +584,15 @@ class RaspberryPiMaster:
         if action == "SET_MODE" and sid in SECTORS:
             mode = data.get("mode", "AUTO")
             self.set_mode(int(sid), str(mode))
+            self._wake_event.set()
         elif action == "EMERGENCY_OFF":
             self.emergency_all_valves_off()
+            self._wake_event.set()
+        elif action in ("SYNC_SIM", "CRISIS_SYNC"):
+            if "crisis" in data:
+                self._current_crisis = str(data["crisis"])
+            self._urgent_sync_until = _now_ts() + 2.5
+            self._wake_event.set()
 
     # ------------------------------------------------------------------
     # Command publishing
@@ -631,7 +649,8 @@ class RaspberryPiMaster:
             self._write_state_file(master_online=True)
 
             elapsed = _now_ts() - loop_start
-            time.sleep(max(0.0, LOOP_INTERVAL - elapsed))
+            self._wake_event.wait(timeout=max(0.05, LOOP_INTERVAL - elapsed))
+            self._wake_event.clear()
         logger.info("Main control loop exited.")
 
     def _publish_system_heartbeat(self) -> None:
@@ -651,6 +670,13 @@ class RaspberryPiMaster:
 
     def _run_decision_cycle(self) -> None:
         now = _now_ts()
+        sim_crisis = self._current_crisis
+        try:
+            with open(SIM_CONTROL_PATH, "r", encoding="utf-8") as fh:
+                sim_crisis = str(json.load(fh).get("crisis", sim_crisis))
+        except Exception:
+            pass
+        self._current_crisis = sim_crisis
 
         for sid in SECTORS:
             with self._lock:
@@ -736,6 +762,7 @@ class RaspberryPiMaster:
                     sector_id=sid,
                     sensor_reading=reading,
                     current_valve_state=current_valve,
+                    crisis=sim_crisis,
                 )
             except Exception as exc:
                 logger.error("DecisionEngine error for sector %s: %s", sid, exc)

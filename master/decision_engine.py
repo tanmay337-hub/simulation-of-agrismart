@@ -106,6 +106,7 @@ class DecisionEngine:
         sector_id: int | str,
         sensor_reading: dict[str, Any],
         current_valve_state: str,
+        crisis: str = "normal",
     ) -> dict[str, Any]:
         """
         Evaluate one sensor reading and return an action decision.
@@ -140,8 +141,47 @@ class DecisionEngine:
         moisture_start = self.thresholds["moisture_start"]
         moisture_stop = self.thresholds["moisture_stop"]
 
+        # --- Environmental crisis overrides (safety & water conservation) ---
+        if crisis == "rainstorm":
+            action = "CLOSE" if current_valve_state == "OPEN" else "MAINTAIN"
+            reason = (
+                f"Rainstorm crisis active (moisture {moisture:.1f}%) — keeping valve CLOSED "
+                "to prevent over-watering."
+            )
+        elif crisis == "frost" or (temperature is not None and float(temperature) <= 3.0):
+            action = "CLOSE" if current_valve_state == "OPEN" else "MAINTAIN"
+            reason = (
+                f"Frost protection active (temp={temperature}°C) — locking valve CLOSED "
+                "to protect lines and roots."
+            )
+        elif crisis == "water_supply_failure":
+            action = "CLOSE" if current_valve_state == "OPEN" else "MAINTAIN"
+            reason = (
+                "Pump / water supply failure (0.0 L/m flow) — holding valve CLOSED "
+                "to protect pump coil."
+            )
+        elif crisis == "heatwave":
+            heat_start = min(moisture_stop - 2.0, moisture_start + 5.0)
+            if moisture < heat_start:
+                action = "OPEN"
+                reason = (
+                    f"Heatwave crisis active: moisture {moisture:.1f}% < accelerated heat "
+                    f"threshold ({heat_start:.0f}%). Emergency irrigation OPEN."
+                )
+            elif moisture > moisture_stop:
+                action = "CLOSE"
+                reason = (
+                    f"Soil moisture {moisture:.1f}% exceeds stop threshold ({moisture_stop}%). "
+                    "Valve closed."
+                )
+            else:
+                action = "MAINTAIN"
+                reason = (
+                    f"Heatwave active: moisture {moisture:.1f}% in buffer band. Holding "
+                    f"valve ({current_valve_state})."
+                )
         # --- Core irrigation rule (hysteresis band) ---
-        if moisture < moisture_start:
+        elif moisture < moisture_start:
             action = "OPEN"
             reason = (
                 f"Soil moisture {moisture:.1f}% is below the irrigation start "

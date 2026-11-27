@@ -28,6 +28,7 @@ const SECTOR_TITLES = {
 
 let selectedSector = 1;
 let latestState = null;
+let hoverTarget = null; // { sid, label, clientX, clientY }
 const logs = [];
 
 // DOM refs
@@ -39,17 +40,116 @@ const elKpiWater = document.getElementById("kpi-water");
 const elCrisisBadge = document.getElementById("active-crisis-badge");
 const elCrisis3DBanner = document.getElementById("crisis-banner-3d");
 const elHudTooltip = document.getElementById("hud-tooltip");
+const elHoverCard = document.getElementById("sector-hover-card");
+const elCanvasWrap = document.getElementById("canvas-wrap");
 const elRpiBadge = document.getElementById("rpi-status-badge");
 const elRpiReactions = document.getElementById("rpi-reactions");
 const elSensorsList = document.getElementById("sensors-list");
 const elLogFeed = document.getElementById("log-feed");
 
-// 1. Three.js 3D Farmland
+function renderHoverCard() {
+  if (!elHoverCard || !hoverTarget || !hoverTarget.sid) {
+    if (elHoverCard) elHoverCard.classList.add("hidden");
+    return;
+  }
+  const sid = Number(hoverTarget.sid);
+  const s = latestState?.sectors?.[String(sid)];
+  if (!s) {
+    elHoverCard.classList.add("hidden");
+    return;
+  }
+  const th = latestState?.thresholds || { moisture_start: 30, moisture_stop: 55 };
+  const crisis = latestState?.crisis || "normal";
+  const node = s.node || {};
+  const valve = s.valve || {};
+  const sensor = s.sensor || {};
+  const sh = s.sensor_health || {};
+  const chErr = s.channel_errors || {};
+
+  const moistBad = (sh.moisture && sh.moisture !== "ok") || Boolean(chErr.moisture) || sensor.moisture === null || sensor.moisture === undefined;
+  const moist = moistBad ? null : Number(sensor.moisture);
+  const flow = Number(valve.flow_rate_lpm ?? sensor.flow_rate_lpm ?? 0);
+  const temp = sensor.temperature;
+  const hum = sensor.humidity;
+
+  let needClass = "need-no";
+  let needText = "✅ ADEQUATE — NO WATER NEEDED";
+  if (moistBad) {
+    needClass = "need-lock";
+    needText = "⛔ SENSOR FAULT — LOCKED SAFE";
+  } else if (crisis === "water_supply_failure") {
+    needClass = "need-lock";
+    needText = "🚱 NO WATER SUPPLY (0.0 L/m)";
+  } else if (crisis === "frost" || (typeof temp === "number" && temp <= 3.0)) {
+    needClass = "need-lock";
+    needText = "❄️ FROST LOCK — WATERING PAUSED";
+  } else if (crisis === "rainstorm") {
+    needClass = "need-no";
+    needText = "🌧️ RAINING — NO WATER NEEDED";
+  } else if (valve.state === "OPEN" && flow > 0.05) {
+    needClass = "need-flow";
+    needText = `🚿 WATERING NOW (${flow.toFixed(1)} L/m)`;
+  } else if (moist < Number(th.moisture_start || 30)) {
+    needClass = "need-yes";
+    needText = `💧 NEEDS WATER! (< ${th.moisture_start ?? 30}%)`;
+  } else if (moist >= Number(th.moisture_stop || 55)) {
+    needClass = "need-no";
+    needText = "✅ WELL WATERED — NO WATER NEEDED";
+  }
+
+  const pct = moist === null ? 0 : Math.max(0, Math.min(100, moist));
+  const fillCls = moistBad ? "err" : (moist < Number(th.moisture_start || 30) ? "dry" : "wet");
+  const st = (node.status || "offline").toUpperCase();
+
+  elHoverCard.innerHTML = `
+    <div class="shc-head">
+      <span>${SECTOR_TITLES[sid] || `Sector ${sid}`}</span>
+      <span class="pill ${st === "ONLINE" ? "" : st === "STALE" ? "stale" : "offline"}">${st}</span>
+    </div>
+    <div class="shc-hw">${hoverTarget.label || "Crop Plot"} · Mode: ${s.mode || "AUTO"}</div>
+    <span class="shc-need ${needClass}">${needText}</span>
+    <div class="shc-bar-row">
+      <span>Soil Moisture</span>
+      <span>${moist === null ? "FAULT / N/A" : `${moist.toFixed(1)}%`}</span>
+    </div>
+    <div class="shc-bar-track">
+      <div class="shc-bar-fill ${fillCls}" style="width:${moist === null ? 100 : pct}%"></div>
+    </div>
+    <div class="shc-stats">
+      <span>T:${typeof temp === "number" ? temp.toFixed(1) + "°C" : "--"}</span>
+      <span>H:${typeof hum === "number" ? hum.toFixed(0) + "%" : "--"}</span>
+      <span>Valve:${valve.state || "CLOSED"}</span>
+    </div>
+  `;
+  elHoverCard.classList.remove("hidden");
+
+  if (elCanvasWrap && typeof hoverTarget.clientX === "number") {
+    const rect = elCanvasWrap.getBoundingClientRect();
+    const cardW = elHoverCard.offsetWidth || 245;
+    const cardH = elHoverCard.offsetHeight || 135;
+    let left = hoverTarget.clientX - rect.left + 16;
+    let top = hoverTarget.clientY - rect.top - cardH - 12;
+    if (left + cardW > rect.width - 8) left = Math.max(8, hoverTarget.clientX - rect.left - cardW - 16);
+    if (top < 8) top = Math.min(rect.height - cardH - 8, hoverTarget.clientY - rect.top + 18);
+    elHoverCard.style.left = `${left}px`;
+    elHoverCard.style.top = `${top}px`;
+  }
+}
+
+// 1. Three.js 2.5D Farmland
 const farm3d = new Farm3DScene(
   document.getElementById("farm3d-canvas"),
   (sid) => selectSector(sid),
-  (sid, label) => {
-    if (elHudTooltip) elHudTooltip.textContent = `Inspecting ${label} — click to select`;
+  (sid, label, clientX, clientY) => {
+    if (!sid) {
+      hoverTarget = null;
+      renderHoverCard();
+      if (elHudTooltip) elHudTooltip.textContent = "Hover a sector to check soil moisture & water need · Click to inspect";
+      return;
+    }
+    hoverTarget = { sid, label, clientX, clientY };
+    renderHoverCard();
+    if (elHudTooltip) elHudTooltip.textContent = `Sector ${sid} (${label}) — click to lock inspector`;
   }
 );
 
@@ -180,6 +280,7 @@ function renderUI(state, mode) {
   });
 
   renderInspector(state);
+  renderHoverCard();
 }
 
 function renderInspector(state) {

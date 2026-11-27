@@ -110,9 +110,36 @@ class SensorSimulator:
         )
 
     def set_crisis_mode(self, crisis: str) -> None:
-        """Set farm-wide environmental crisis mode."""
-        if crisis in CRISIS_MODES:
-            self._crisis_mode = crisis
+        """Set farm-wide environmental crisis mode and apply immediate onset shift."""
+        if crisis not in CRISIS_MODES or crisis == self._crisis_mode:
+            return
+        prev = self._crisis_mode
+        self._crisis_mode = crisis
+        self._apply_crisis_onset(crisis, prev)
+
+    def _apply_crisis_onset(self, crisis: str, prev: str) -> None:
+        """Immediately shift sensor readings when entering or leaving a crisis."""
+        for state in self._sectors.values():
+            if crisis == "heatwave":
+                state.temperature = max(state.temperature + 8.5, 40.0 + random.uniform(-0.8, 1.8))
+                state.humidity = min(state.humidity - 16.0, 21.0 + random.uniform(-2.0, 2.0))
+                state.light_lux = max(state.light_lux, 76000.0 + random.uniform(-1500, 2500))
+                state.moisture = max(5.0, state.moisture - 9.0)
+            elif crisis == "rainstorm":
+                state.moisture = min(100.0, state.moisture + 16.0)
+                state.temperature = min(state.temperature, 21.5 + random.uniform(-0.8, 0.8))
+                state.humidity = max(state.humidity, 93.0 + random.uniform(-1.5, 2.5))
+                state.light_lux = min(state.light_lux, 4400.0 + random.uniform(-400, 400))
+            elif crisis == "frost":
+                state.temperature = 1.4 + random.uniform(-0.6, 0.6)
+                state.humidity = max(state.humidity, 84.0 + random.uniform(-2.0, 2.0))
+                state.light_lux = min(state.light_lux, 12000.0 + random.uniform(-800, 800))
+            elif crisis == "normal" and prev in ("heatwave", "rainstorm", "frost"):
+                state.temperature = max(25.0, min(32.0, state.temperature if 24.0 <= state.temperature <= 33.0 else 28.5 + random.uniform(-1.5, 2.0)))
+                state.humidity = max(40.0, min(60.0, state.humidity if 38.0 <= state.humidity <= 65.0 else 49.0 + random.uniform(-3.0, 3.0)))
+                state.light_lux = LIGHT_BASELINE_LUX + random.uniform(-800, 800)
+            self._clamp(state)
+            state.sequence_number += 1
 
     def set_sensor_fault(self, sector_id: int, sensor_name: str, mode: str) -> bool:
         """Set fault mode ('ok','missing','stale','invalid','noisy') on one sensor."""
@@ -353,25 +380,25 @@ class SensorSimulator:
         crisis = self._crisis_mode
         if crisis == "heatwave":
             if irrigating_with_flow:
-                state.moisture += 0.25
+                state.moisture += 0.35
             else:
-                state.moisture -= 0.95
-            state.temperature += (42.0 - state.temperature) * 0.08 + random.gauss(0, 0.05)
-            state.humidity += (18.0 - state.humidity) * 0.08 + random.gauss(0, 0.06)
-            state.light_lux += (78000.0 - state.light_lux) * 0.08
+                state.moisture -= 1.35
+            state.temperature += (42.5 - state.temperature) * 0.22 + random.gauss(0, 0.05)
+            state.humidity += (18.0 - state.humidity) * 0.20 + random.gauss(0, 0.06)
+            state.light_lux += (78000.0 - state.light_lux) * 0.22
         elif crisis == "rainstorm":
-            state.moisture += 0.75 + (0.45 if irrigating_with_flow else 0.0)
-            state.temperature += (21.0 - state.temperature) * 0.07 + random.gauss(0, 0.04)
-            state.humidity += (94.0 - state.humidity) * 0.10 + random.gauss(0, 0.05)
-            state.light_lux += (4500.0 - state.light_lux) * 0.15
+            state.moisture += 1.65 + (0.45 if irrigating_with_flow else 0.0)
+            state.temperature += (21.0 - state.temperature) * 0.18 + random.gauss(0, 0.04)
+            state.humidity += (94.0 - state.humidity) * 0.25 + random.gauss(0, 0.05)
+            state.light_lux += (4500.0 - state.light_lux) * 0.25
         elif crisis == "frost":
             if irrigating_with_flow:
                 state.moisture += 0.45
             else:
-                state.moisture -= 0.10
-            state.temperature += (1.0 - state.temperature) * 0.10 + random.gauss(0, 0.04)
-            state.humidity += (82.0 - state.humidity) * 0.06
-            state.light_lux += (14000.0 - state.light_lux) * 0.10
+                state.moisture -= 0.15
+            state.temperature += (1.2 - state.temperature) * 0.25 + random.gauss(0, 0.04)
+            state.humidity += (84.0 - state.humidity) * 0.18
+            state.light_lux += (12000.0 - state.light_lux) * 0.20
         else:
             self._apply_moisture_drift(state, irrigating_with_flow)
             self._drift_temperature(state)

@@ -3,7 +3,12 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AgriSmart Field Sim — 3D Distributed IoT Irrigation</title>
+  <title>AgriSmart Field Sim — 2.5D Distributed IoT Irrigation</title>
+  <link
+    rel="icon"
+    type="image/svg+xml"
+    href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%235c943d'/%3E%3Crect x='7' y='7' width='2' height='7' fill='%23362319'/%3E%3Crect x='3' y='4' width='4' height='4' fill='%239ccc65'/%3E%3Crect x='9' y='3' width='4' height='4' fill='%23aed581'/%3E%3C/svg%3E"
+  />
 
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -31,10 +36,10 @@
   <!-- TOP HEADER BAR -->
   <header class="topbar">
     <div class="brand">
-      <div class="brand-badge">16-BIT SIM</div>
+      <div class="brand-badge">2.5D PIXEL SIM</div>
       <div>
         <h1>AGRISMART FIELD SIMULATOR</h1>
-        <p class="subtitle">4 Field ESP32 Nodes (3D Farmland) + Mosquitto MQTT + Off-Site Raspberry Pi 5</p>
+        <p class="subtitle">4 Field ESP32 Nodes (2.5D Farmland) + Mosquitto MQTT + Off-Site Raspberry Pi 5</p>
       </div>
     </div>
 
@@ -78,27 +83,28 @@
 
   <!-- MAIN WORKSPACE GRID -->
   <main class="main-grid">
-    <!-- LEFT COLUMN: 3D FARMLAND + OFF-SITE RPi 5 SAFE LINK -->
+    <!-- LEFT COLUMN: 2.5D FARMLAND + OFF-SITE RPi 5 SAFE LINK -->
     <section class="left-pane">
       <div class="panel viewport-panel">
         <div class="panel-head">
           <div>
-            <h2>🌾 INTERACTIVE 3D FARMLAND (FIELD HARDWARE ONLY)</h2>
-            <span class="hint">Drag to orbit · Scroll to zoom · Click any sector, ESP32 box, sensor or valve</span>
+            <h2>🌾 INTERACTIVE 2.5D FARMLAND (FIELD HARDWARE ONLY)</h2>
+            <span class="hint">Hover any sector for water need &amp; soil moisture · Drag to pan/tilt · Scroll to zoom · Click to inspect</span>
           </div>
           <div class="cam-presets">
-            <button class="btn-mini active" data-cam="overview">Overview</button>
+            <button class="btn-mini active" data-cam="overview">2.5D View</button>
             <button class="btn-mini" data-cam="1">Sec 1</button>
             <button class="btn-mini" data-cam="2">Sec 2</button>
             <button class="btn-mini" data-cam="3">Sec 3</button>
             <button class="btn-mini" data-cam="4">Sec 4</button>
-            <button class="btn-mini" data-cam="top">Map</button>
+            <button class="btn-mini" data-cam="top">Top</button>
           </div>
         </div>
 
         <div class="canvas-wrap" id="canvas-wrap">
           <canvas id="farm3d-canvas"></canvas>
-          <div class="hud-overlay" id="hud-tooltip">Click a sector in 3D to inspect ESP32 &amp; sensors</div>
+          <div class="sector-hover-card hidden" id="sector-hover-card"></div>
+          <div class="hud-overlay" id="hud-tooltip">Hover a sector to check soil moisture &amp; water need · Click to inspect</div>
           <div class="crisis-banner-3d hidden" id="crisis-banner-3d"></div>
         </div>
 

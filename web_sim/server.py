@@ -264,6 +264,20 @@ async def api_mode(request):
     return JSONResponse({"ok": ok, "sector_id": sid, "mode": mode})
 
 
+def _notify_sync(crisis: str = "normal") -> None:
+    bridge.publish(
+        "farm/system/control",
+        {
+            "cmd_id": str(uuid.uuid4()),
+            "action": "SYNC_SIM",
+            "crisis": crisis,
+            "timestamp": _now_iso(),
+            "source": "web_sim",
+        },
+        qos=1,
+    )
+
+
 async def api_sensor_fault(request):
     body = await request.json()
     sid = str(int(body.get("sector_id", 1)))
@@ -274,6 +288,7 @@ async def api_sensor_fault(request):
     sec.setdefault("sensor_faults", {})[sensor] = mode
     sec["updated_at"] = _now_iso()
     _save_json_atomic(SIM_CTRL_FILE, ctrl)
+    _notify_sync(ctrl.get("crisis", "normal"))
     return JSONResponse({"ok": True, "sector_id": sid, "sensor": sensor, "mode": mode})
 
 
@@ -286,6 +301,7 @@ async def api_valve_fault(request):
     sec["valve_fault_mode"] = mode
     sec["updated_at"] = _now_iso()
     _save_json_atomic(SIM_CTRL_FILE, ctrl)
+    _notify_sync(ctrl.get("crisis", "normal"))
     return JSONResponse({"ok": True, "sector_id": sid, "valve_fault_mode": mode})
 
 
@@ -298,6 +314,7 @@ async def api_node_disconnect(request):
     sec["disconnect"] = disconnect
     sec["updated_at"] = _now_iso()
     _save_json_atomic(SIM_CTRL_FILE, ctrl)
+    _notify_sync(ctrl.get("crisis", "normal"))
     return JSONResponse({"ok": True, "sector_id": sid, "disconnect": disconnect})
 
 
@@ -307,6 +324,7 @@ async def api_crisis(request):
     ctrl = _load_json(SIM_CTRL_FILE, {"crisis": "normal", "sectors": {}})
     ctrl["crisis"] = crisis
     _save_json_atomic(SIM_CTRL_FILE, ctrl)
+    _notify_sync(crisis)
     return JSONResponse({"ok": True, "crisis": crisis})
 
 
@@ -323,6 +341,7 @@ async def api_manual_sensor(request):
     }
     sec["updated_at"] = _now_iso()
     _save_json_atomic(SIM_CTRL_FILE, ctrl)
+    _notify_sync(ctrl.get("crisis", "normal"))
     return JSONResponse({"ok": True, "sector_id": sid})
 
 
@@ -366,6 +385,7 @@ async def api_restore_all(request):
             "updated_at": _now_iso(),
         }
     _save_json_atomic(SIM_CTRL_FILE, ctrl)
+    _notify_sync("normal")
     return JSONResponse({"ok": True})
 
 
@@ -374,7 +394,7 @@ async def ws_endpoint(websocket: WebSocket):
     try:
         while True:
             await websocket.send_json(_build_snapshot())
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.45)
     except WebSocketDisconnect:
         pass
     except Exception:

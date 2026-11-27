@@ -110,8 +110,11 @@ export class SimController {
 
     // Try backend WebSocket if served over HTTP(S)
     if (location.protocol.startsWith("http")) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 1200);
       try {
-        const res = await fetch("/api/state", { cache: "no-store" });
+        const res = await fetch("api/state", { cache: "no-store", signal: ctrl.signal });
+        clearTimeout(timer);
         if (res.ok) {
           const snap = await res.json();
           if (snap && (snap.backend_online || snap.bridge_mqtt_connected)) {
@@ -122,6 +125,7 @@ export class SimController {
           }
         }
       } catch {
+        clearTimeout(timer);
         // Fall through to browser sandbox
       }
     }
@@ -435,6 +439,9 @@ export class SimController {
     sb.online_node_count = onlineCount;
     sb.active_valve_count = openValves;
     sb.total_water_consumed_litres = Number(totalWater.toFixed(3));
+    if (this.activityBuckets.length === 0 && this.currentBucket.total > 0) {
+      this.activityBuckets.push({ ...this.currentBucket });
+    }
     this.onUpdate(sb, this.mode, null);
   }
 
@@ -529,7 +536,56 @@ export class SimController {
 
   async setCrisis(crisis) {
     if (this.mode === "backend") return this._post("/api/crisis", { crisis });
-    this.sandbox.crisis = crisis;
+    const sb = this.sandbox;
+    const prev = sb.crisis;
+    if (crisis === prev) return;
+    sb.crisis = crisis;
+    const nowStr = new Date().toTimeString().slice(0, 8);
+    const th = sb.thresholds;
+
+    for (const sid of [1, 2, 3, 4]) {
+      const phys = sb._phys[sid];
+      const sec = sb.sectors[String(sid)];
+      if (crisis === "heatwave") {
+        phys.temperature = Math.max(phys.temperature + 8.5, 40.0);
+        phys.humidity = Math.min(phys.humidity - 16, 21);
+        phys.light_lux = 78000;
+        phys.moisture = Math.max(5, phys.moisture - 9);
+        this.onLog({ time: nowStr, sector: sid, kind: "ALERT", text: `ESP32-${sid} heatwave surge (${phys.temperature.toFixed(1)}°C) → immediate cooling check.` });
+        if (sec.mode === "AUTO" && sec.valve.state === "CLOSED" && sec.sensor_health.moisture === "ok" && phys.moisture < th.moisture_start + 5) {
+          this._executeSandboxCommand(sid, "OPEN", "esp32_heatwave");
+        }
+      } else if (crisis === "rainstorm") {
+        phys.moisture = Math.min(100, phys.moisture + 16);
+        phys.temperature = Math.min(phys.temperature, 21.5);
+        phys.humidity = Math.max(phys.humidity, 94);
+        phys.light_lux = 4400;
+        this.onLog({ time: nowStr, sector: sid, kind: "ALERT", text: `ESP32-${sid} DHT22/soil rain deluge detected → immediate shutoff.` });
+        if (sec.mode === "AUTO" && sec.valve.state === "OPEN") {
+          this._executeSandboxCommand(sid, "CLOSE", "esp32_rain_shutoff");
+        }
+      } else if (crisis === "frost") {
+        phys.temperature = 1.4;
+        phys.humidity = Math.max(phys.humidity, 84);
+        phys.light_lux = 12000;
+        this.onLog({ time: nowStr, sector: sid, kind: "ALERT", text: `FROST RISK: ESP32-${sid} temp ${phys.temperature.toFixed(1)}°C ≤ 3°C → locking valve CLOSED!` });
+        if (sec.valve.state === "OPEN") {
+          this._executeSandboxCommand(sid, "CLOSE", "esp32_frost_protect");
+        }
+      } else if (crisis === "water_supply_failure") {
+        this.onLog({ time: nowStr, sector: sid, kind: "ALERT", text: `PUMP FAILURE: ESP32-${sid} flow 0.0 L/m → protecting solenoid.` });
+        if (sec.valve.state === "OPEN") {
+          this._executeSandboxCommand(sid, "CLOSE", "esp32_dryrun_shutoff");
+        }
+      } else if (crisis === "broker_outage") {
+        if (sec.valve.state === "OPEN") sec.valve.state = "CLOSED";
+        this.onLog({ time: nowStr, sector: sid, kind: "ALERT", text: `BROKER OUTAGE: ESP32-${sid} engaged immediate local fail-safe (valve CLOSED).` });
+      } else if (crisis === "normal" && prev !== "normal") {
+        phys.temperature = INITIAL_SECTORS[sid].temperature;
+        phys.humidity = INITIAL_SECTORS[sid].humidity;
+        phys.light_lux = INITIAL_SECTORS[sid].light_lux;
+      }
+    }
     this._tickSandbox();
   }
 
