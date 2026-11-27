@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -124,9 +126,8 @@ class MQTTStateHolder:
         if not is_conn:
             try:
                 self.client.reconnect()
-            except Exception as exc:
-                with self.lock:
-                    self.error = str(exc)
+            except Exception:
+                self._connect()
 
     def snapshot(self) -> tuple[bool, str, list[dict]]:
         with self.lock:
@@ -768,23 +769,26 @@ def page_fault_injection(state: dict | None) -> None:
     with gc3:
         if st.button("🔄 Restart Master Process", width='stretch'):
             try:
-                subprocess.run(
-                    [
-                        "powershell",
-                        "-NoProfile",
-                        "-Command",
-                        "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -match 'raspberry_pi_master' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }",
-                    ],
-                    timeout=5,
-                    check=False,
-                )
+                if os.name == "nt":
+                    subprocess.run(
+                        [
+                            "powershell",
+                            "-NoProfile",
+                            "-Command",
+                            "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -match 'raspberry_pi_master' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }",
+                        ],
+                        timeout=5,
+                        check=False,
+                    )
+                else:
+                    subprocess.run(["pkill", "-f", "raspberry_pi_master.py"], timeout=5, check=False)
                 time.sleep(1)
                 subprocess.Popen(
                     [sys.executable, str(MASTER_SCRIPT)],
                     cwd=str(PROJECT_ROOT),
                     creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0,
                 )
-                st.success("Master Controller restarted in a new console!")
+                st.success("Master Controller restarted!")
             except Exception as exc:
                 st.error(f"Could not restart master: {exc}")
 
@@ -795,11 +799,64 @@ def page_fault_injection(state: dict | None) -> None:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# CLOUD CONTAINER RUNTIME BOOTSTRAP (Streamlit Community Cloud / Linux)
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def _port_open(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+@st.cache_resource
+def ensure_cloud_runtime() -> dict:
+    """On Linux cloud hosts (e.g. Streamlit Community Cloud), launch Mosquitto,
+    the Master process, and the 4 ESP32 node processes if not already running."""
+    if os.name == "nt" or _port_open("127.0.0.1", 1883):
+        return {"started": False}
+
+    mosq = shutil.which("mosquitto")
+    if not mosq:
+        return {"started": False, "error": "mosquitto binary not found"}
+
+    (PROJECT_ROOT / "logs").mkdir(parents=True, exist_ok=True)
+    (PROJECT_ROOT / "data").mkdir(parents=True, exist_ok=True)
+    procs = []
+    try:
+        procs.append(
+            subprocess.Popen(
+                [mosq, "-p", "1883"],
+                cwd=str(PROJECT_ROOT),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        )
+        for _ in range(30):
+            if _port_open("127.0.0.1", 1883):
+                break
+            time.sleep(0.1)
+
+        procs.append(subprocess.Popen([sys.executable, str(MASTER_SCRIPT)], cwd=str(PROJECT_ROOT)))
+        time.sleep(1.0)
+        for sid in SECTORS:
+            node_script = PROJECT_ROOT / "esp32_nodes" / f"esp32_sector_{sid}.py"
+            procs.append(subprocess.Popen([sys.executable, str(node_script)], cwd=str(PROJECT_ROOT)))
+        time.sleep(1.5)
+        return {"started": True, "pids": [p.pid for p in procs]}
+    except Exception as exc:
+        return {"started": False, "error": str(exc)}
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # MAIN + 5-SECOND FRAGMENT AUTO-REFRESH
 # ═════════════════════════════════════════════════════════════════════════════
 
 
 def main() -> None:
+    ensure_cloud_runtime()
     holder = get_mqtt_holder()
     holder.reconnect_if_needed()
 
